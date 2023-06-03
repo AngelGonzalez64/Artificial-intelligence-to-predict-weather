@@ -1,4 +1,3 @@
-# Importar las bibliotecas necesarias
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
@@ -8,6 +7,7 @@ from keras.layers import Dense, LSTM
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from tkinter import *
+import concurrent.futures
 
 # Leer los datos
 df = pd.read_csv('Entrenamiento.csv')
@@ -19,18 +19,18 @@ df['fecha'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y')
 df = df.sort_values('fecha')
 
 # Normalizar las características para mejorar el rendimiento de LSTM
-scaler = MinMaxScaler(feature_range=(0,1))
-df_scaled = scaler.fit_transform(df.iloc[:,1:])
+scaler = MinMaxScaler(feature_range=(0, 1))
+df_scaled = scaler.fit_transform(df.iloc[:, 1:])
 
 # Dividir los datos en entrenamiento y prueba
 train_size = int(len(df_scaled) * 0.8)
-train, test = df_scaled[0:train_size,:], df_scaled[train_size:len(df_scaled),:]
+train, test = df_scaled[0:train_size, :], df_scaled[train_size:len(df_scaled), :]
 
 # Convertir un arreglo de valores en una matriz de conjuntos de datos
 def create_dataset(dataset, look_back=1):
     dataX, dataY = [], []
-    for i in range(len(dataset)-look_back-1):
-        a = dataset[i:(i+look_back), :]
+    for i in range(len(dataset) - look_back - 1):
+        a = dataset[i:(i + look_back), :]
         dataX.append(a)
         dataY.append(dataset[i + look_back, 0])
     return np.array(dataX), np.array(dataY)
@@ -56,10 +56,10 @@ trainPredict = model.predict(trainX)
 testPredict = model.predict(testX)
 
 # Invertir las predicciones a escala original
-trainPredict = scaler.inverse_transform(np.hstack((trainPredict, np.zeros((trainPredict.shape[0], df_scaled.shape[1]-1)))))
-trainPredict = trainPredict[:,0]
-testPredict = scaler.inverse_transform(np.hstack((testPredict, np.zeros((testPredict.shape[0], df_scaled.shape[1]-1)))))
-testPredict = testPredict[:,0]
+trainPredict = scaler.inverse_transform(np.hstack((trainPredict, np.zeros((trainPredict.shape[0], df_scaled.shape[1] - 1)))))
+trainPredict = trainPredict[:, 0]
+testPredict = scaler.inverse_transform(np.hstack((testPredict, np.zeros((testPredict.shape[0], df_scaled.shape[1] - 1)))))
+testPredict = testPredict[:, 0]
 
 # Calcular el error cuadrático medio
 trainScore = np.sqrt(mean_squared_error(trainY, trainPredict))
@@ -78,29 +78,44 @@ def predecir():
     # Preparar los datos para las predicciones futuras
     predictions = pd.date_range(start=df['fecha'].iloc[-1] + pd.DateOffset(1), periods=days_to_predict)
 
-    # Predecir el clima para el futuro
+    # Predecir el clima para el futuro utilizando hilos
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_predictions = [executor.submit(predict_next_day, df_scaled, predictions[i]) for i in range(days_to_predict)]
+
+        # Obtener los resultados de las predicciones
+        next_pred_unscaled = []
+        for future in concurrent.futures.as_completed(future_predictions):
+            next_pred_unscaled.append(future.result())
+
+    # Actualizar los datos y visualizar las predicciones
     for i in range(days_to_predict):
-        last_features = df_scaled[-look_back:]
-        last_features = last_features.reshape((1, look_back, df_scaled.shape[1]))
-        next_pred = model.predict(last_features)
-        next_pred_unscaled = scaler.inverse_transform(np.hstack((next_pred, np.zeros((next_pred.shape[0], df_scaled.shape[1]-1)))))
-        next_pred_unscaled = next_pred_unscaled[0,0]
-        next_row_scaled = np.hstack((next_pred, np.zeros((next_pred.shape[0], df_scaled.shape[1]-1))))
+        #next_row_scaled = np.hstack((next_pred_unscaled[i], np.zeros((next_pred_unscaled[i].shape[0], df_scaled.shape[1] - 1))))
+        next_row_scaled = np.hstack((next_pred_unscaled[i].reshape(-1, 1), np.zeros((next_pred_unscaled[i].shape[0], df_scaled.shape[1] - 1))))
+
         df_scaled = np.vstack((df_scaled, next_row_scaled))
-        df = df.append(pd.DataFrame({'fecha':predictions[i], 'temperatura_media':next_pred_unscaled}, index=[0]), ignore_index=True)
+        df = df.append(pd.DataFrame({'fecha': predictions[i], 'temperatura_media': next_pred_unscaled[i][0]}, index=[0]), ignore_index=True)
 
     # Visualizar las predicciones
-    plt.figure(figsize=(8,6))
+    plt.figure(figsize=(8, 6))
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y/%m/%d'))
     plt.gca().xaxis.set_major_locator(mdates.YearLocator())
-    plt.plot(df['fecha'][:len(train)+look_back], df['temperatura_media'][:len(train)+look_back], label='Entrenamiento')
-    plt.plot(df['fecha'][len(train)+look_back:len(df)-days_to_predict], df['temperatura_media'][len(train)+look_back:len(df)-days_to_predict], label='Prueba')
-    plt.plot(df['fecha'][len(df)-days_to_predict:], df['temperatura_media'][len(df)-days_to_predict:], label='Predicción')
+    plt.plot(df['fecha'][:len(train) + look_back], df['temperatura_media'][:len(train) + look_back], label='Entrenamiento')
+    plt.plot(df['fecha'][len(train) + look_back:len(df) - days_to_predict], df['temperatura_media'][len(train) + look_back:len(df) - days_to_predict], label='Prueba')
+    plt.plot(df['fecha'][len(df) - days_to_predict:], df['temperatura_media'][len(df) - days_to_predict:], label='Predicción')
     plt.title('Predicción del clima para el próximo año')
     plt.xlabel('Fecha')
     plt.ylabel('Temperatura Media')
     plt.legend()
     plt.show()
+
+# Función para predecir un solo día utilizando el modelo LSTM
+def predict_next_day(data, date):
+    last_features = data[-look_back:]
+    last_features = last_features.reshape((1, look_back, df_scaled.shape[1]))
+    next_pred = model.predict(last_features)
+    next_pred_unscaled = scaler.inverse_transform(np.hstack((next_pred, np.zeros((next_pred.shape[0], df_scaled.shape[1] - 1)))))
+    next_pred_unscaled = next_pred_unscaled[0, :]
+    return next_pred_unscaled
 
 # Crear la GUI
 root = Tk()
